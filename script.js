@@ -400,6 +400,19 @@ function sortedEmployees() {
  *    残日数     J … G − H
  */
 
+/*
+ *  同じ有給がもう入っているか（人が同じかどうかは呼ぶ側で見る）。
+ *  全日・半休は1日に1回しか取らないので、日付と単位が同じなら同じもの。
+ *  時間単位（正職はすべてこれ）は1日に何回も休むことがあるので、
+ *  時間数と時間帯まで同じときだけ同じものとみなす（うっかり二重登録だけを止める）。
+ */
+function sameLeave(a, b) {
+  if (a.date !== b.date || a.type !== b.type) return false;
+  if (a.type !== 'hours') return true;
+  return Math.abs((Number(a.hours) || 0) - (Number(b.hours) || 0)) < 1e-9
+    && (a.in1 || '') === (b.in1 || '') && (a.out1 || '') === (b.out1 || '');
+}
+
 // 1件の有給が何日ぶんか
 function leaveDays(leave, emp) {
   if (leave.type === 'full')  return 1;
@@ -855,8 +868,7 @@ function mergeEmployees(keepId, otherIds) {
 
     for (const l of DB.leaves) {
       if (l.empId !== oid) continue;
-      const dup = DB.leaves.some(x =>
-        x.empId === keep.id && x.date === l.date && x.type === l.type);
+      const dup = DB.leaves.some(x => x.empId === keep.id && sameLeave(x, l));
       if (dup) { l._drop = true; continue; }
       l.empId = keep.id;
       moved++;
@@ -1483,6 +1495,40 @@ function cancelEditLeave(keepForm) {
 }
 
 /*
+ *  時間帯の欄でEnterを押したときの行き先。最後の欄なら null（＝そこで登録する）。
+ *  開始→終了の順に進む。②（中抜け）は値が入っているときだけ通る。
+ *  空の②まで毎回Enterで通らされると手間なので、使わない人は①の終了で登録まで行く。
+ */
+function nextTimeField(id) {
+  const v = x => document.getElementById(x).value;
+  const row2 = !document.getElementById('inTimeRow2').classList.contains('hidden');
+  if (id === 'inTime1a') return 'inTime1b';
+  if (id === 'inTime1b') return (row2 && (v('inTime2a') || v('inTime2b'))) ? 'inTime2a' : null;
+  if (id === 'inTime2a') return 'inTime2b';
+  return null;
+}
+
+// 有給入力でEnterを押したとき
+function onInputEnter(e) {
+  if (e.key !== 'Enter') return;
+  // 日本語変換の確定Enterは使わない
+  if (e.isComposing || e.keyCode === 229) return;
+  const t = e.target;
+  if (!t || t.tagName !== 'INPUT') return;              // ボタンは元の動きのまま
+  if (t.type === 'checkbox' || t.type === 'radio') return;
+  if (inMode === 'term' || t.closest('#inTermField')) return;   // 長期休暇は打つそばから保存される
+  // 名前欄のEnterは候補えらびに使う（選んだ瞬間に登録まで走らないように）
+  if (t.id === 'inEmpText') return;
+  e.preventDefault();
+  // 時間帯は次の時刻欄へ進む。最後の欄まで来たら登録
+  if (t.type === 'time') {
+    const next = nextTimeField(t.id);
+    if (next) { document.getElementById(next).focus(); return; }
+  }
+  submitLeave();
+}
+
+/*
  *  所定の勤務時間帯が未登録のパートさんは、いま入れた時間帯をそのまま所定にできる。
  *  聞くのは「全日」で入れたときだけ。半休や時間単位の時間帯は1日ぶんの所定ではないため。
  */
@@ -1549,10 +1595,11 @@ function submitLeave() {
     const l = DB.leaves.find(x => x.id === editingLeaveId);
     if (!l) { cancelEditLeave(); return; }
     if (dates.length > 1) { showToast('編集は1日ずつです。日付を1つだけ選んでください', 'warning'); return; }
-    const clash = DB.leaves.some(x =>
-      x.id !== l.id && x.empId === emp.id && x.date === dates[0] && x.type === inputType);
+    const next = { date: dates[0], type: inputType, hours: inputType === 'hours' ? hours : 0, in1, out1 };
+    const clash = DB.leaves.some(x => x.id !== l.id && x.empId === emp.id && sameLeave(x, next));
     if (clash) {
-      showToast(`${emp.name} の ${fmtDate(dates[0])} には同じ単位の有給がもう入っています`, 'warning');
+      showToast(`${emp.name} の ${fmtDate(dates[0])} には`
+        + `${inputType === 'hours' ? '同じ時間帯・時間数' : '同じ単位'}の有給がもう入っています`, 'warning');
       return;
     }
     Object.assign(l, {
@@ -1573,7 +1620,8 @@ function submitLeave() {
 
   let added = 0, skipped = 0;
   for (const date of dates) {
-    const dup = DB.leaves.some(l => l.empId === emp.id && l.date === date && l.type === inputType);
+    const cand = { date, type: inputType, hours: inputType === 'hours' ? hours : 0, in1, out1 };
+    const dup = DB.leaves.some(l => l.empId === emp.id && sameLeave(l, cand));
     if (dup) { skipped++; continue; }
     DB.leaves.push({
       id: newId(), empId: emp.id, date, type: inputType,
@@ -1748,6 +1796,7 @@ function setupCombo(name, conf) {
       const on = list.querySelector('.combo-item.on');
       if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest' });
     } else if (e.key === 'Enter') {
+      if (e.isComposing || e.keyCode === 229) return;    // 漢字変換の確定は選択に使わない
       if (open && c.cursor >= 0) { e.preventDefault(); pickCombo(name, c.cursor); }
       else closeCombo(name);
     } else if (e.key === 'Escape') {
@@ -3501,19 +3550,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (b) setInputType(b.dataset.type, true);
   });
   // Enterで登録まで行けるようにする
-  document.getElementById('inCard').addEventListener('keydown', e => {
-    if (e.key !== 'Enter') return;
-    // 日本語変換の確定Enterは登録に使わない
-    if (e.isComposing || e.keyCode === 229) return;
-    const t = e.target;
-    if (!t || t.tagName !== 'INPUT') return;              // ボタンは元の動きのまま
-    if (t.type === 'checkbox' || t.type === 'radio') return;
-    if (inMode === 'term' || t.closest('#inTermField')) return;   // 長期休暇は打つそばから保存される
-    // 名前の候補が開いているときは、そちらで選ぶほうが先
-    if (!document.getElementById('inEmpList').classList.contains('hidden')) return;
-    e.preventDefault();
-    submitLeave();
-  });
+  document.getElementById('inCard').addEventListener('keydown', onInputEnter);
   document.getElementById('inTc5Mode').addEventListener('click', e => {
     const b = e.target.closest('button[data-tc5]');
     if (b) setTc5Mode(b.dataset.tc5);
