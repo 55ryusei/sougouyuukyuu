@@ -692,6 +692,12 @@ function readEmpForm() {
       in2:  document.getElementById('empT2a').value,
       out2: document.getElementById('empT2b').value
     },
+    // 区分と反対側の所定（兼任の人だけ。空なら兼任ではない）
+    shiftOther: {
+      in1:  document.getElementById('empO1a').value,
+      out1: document.getElementById('empO1b').value,
+      in2: '', out2: ''
+    },
     active: document.getElementById('empActive').checked
   };
 }
@@ -711,6 +717,8 @@ function fillEmpForm(emp) {
   set('empT1b', emp && emp.shift ? emp.shift.out1 : '');
   set('empT2a', emp && emp.shift ? emp.shift.in2 : '');
   set('empT2b', emp && emp.shift ? emp.shift.out2 : '');
+  set('empO1a', emp && emp.shiftOther ? emp.shiftOther.in1 : '');
+  set('empO1b', emp && emp.shiftOther ? emp.shiftOther.out1 : '');
   document.getElementById('empActive').checked = emp ? emp.active !== false : true;
 
   applyEmpTypeFields();
@@ -718,6 +726,18 @@ function fillEmpForm(emp) {
   document.getElementById('empFormTitle').textContent = emp ? `${emp.name} を編集` : '従業員を追加';
   document.getElementById('empCancel').classList.remove('hidden');
   document.getElementById('empDelete').classList.toggle('hidden', !emp);
+}
+
+// 所定の欄の見出しを区分に合わせる。上の欄が区分の側、下の欄が兼任のときの反対側
+function renderEmpShiftLabels() {
+  const mode = document.getElementById('empMode').value === 'swim' ? 'swim' : 'normal';
+  const other = mode === 'swim' ? 'normal' : 'swim';
+  document.getElementById('empShiftLabel').textContent =
+    `所定の勤務時間帯（${TC5_MODES[mode]}・全日／半休のときTC5へ出す時間）`;
+  document.getElementById('empShiftOtherLabel').textContent =
+    `兼任：${TC5_MODES[other]}の所定（${TC5_MODES[mode]}と${TC5_MODES[other]}を兼任している人だけ）`;
+  document.getElementById('empShiftOtherHint').textContent =
+    `有給入力で「TC5の${TC5_MODES[other]}側」を選んだときは、この時間が入ります。空欄なら兼任なしとして上の所定を使います。`;
 }
 
 // パート方式なら入社日・週労働日数、正職方式なら1日の勤務時間が要る
@@ -729,7 +749,8 @@ function applyEmpTypeFields() {
   // 正職は「1日の勤務時間」だけで足りる（全日はその時間数で登録する）。
   document.getElementById('empTcField').classList.toggle('hidden', !part);
   document.getElementById('empShiftField').classList.toggle('hidden', !part);
-  document.getElementById('empShiftLabel').textContent = '所定の勤務時間帯（全日・半休のときTC5へ出す時間）';
+  document.getElementById('empShiftOtherField').classList.toggle('hidden', !part);
+  renderEmpShiftLabels();
   document.getElementById('empTimeRow2').classList.toggle('hidden', !part);
   document.getElementById('empDailyLabel').textContent = part ? '1日の勤務時間' : '1日の勤務時間（全日の有給はこの時間数）';
   renderEmpShiftHint();
@@ -781,6 +802,10 @@ function saveEmployee() {
   }
   if (f.type === 'staff' && !(f.dailyHours > 0)) {
     showToast('正職方式は1日の勤務時間が必要です（日数換算に使います）', 'warning'); return;
+  }
+  // 兼任の所定は開始・終了の両方そろって初めて使える
+  if (!!f.shiftOther.in1 !== !!f.shiftOther.out1) {
+    showToast('兼任の所定は開始と終了の両方を入れてください（使わないなら両方空欄）', 'warning'); return;
   }
 
   const dup = DB.employees.find(e => e.tcName === f.tcName && e.mode === f.mode && e.id !== f.id);
@@ -846,7 +871,7 @@ function duplicateGroups() {
   return groups;
 }
 
-// keepId の人に others をまとめる（有給は日付＋単位が同じものだけ捨てる）
+// keepId の人に others をまとめる（有給はまったく同じもの＝sameLeave だけ捨てる）
 function mergeEmployees(keepId, otherIds) {
   const keep = getEmp(keepId);
   if (!keep) return 0;
@@ -860,6 +885,8 @@ function mergeEmployees(keepId, otherIds) {
       if (!keep[k] && other[k]) keep[k] = other[k];
     }
     if (!keep.shift || !keep.shift.in1) if (other.shift && other.shift.in1) keep.shift = { ...other.shift };
+    // 兼任の所定も、残す側に無ければ引き継ぐ（統合は同じ区分どうしなので反対側も同じ）
+    if (!isKennin(keep) && isKennin(other)) keep.shiftOther = { ...other.shiftOther };
     keep.weekDaysByGrant = { ...(other.weekDaysByGrant || {}), ...(keep.weekDaysByGrant || {}) };
     keep.invalidGrants  = { ...(other.invalidGrants  || {}), ...(keep.invalidGrants  || {}) };
     keep.grantOverrides = { ...(other.grantOverrides || {}), ...(keep.grantOverrides || {}) };
@@ -1033,7 +1060,10 @@ function renderEmpTable() {
   }
   tbody.innerHTML = list.map(e => {
     const sh = e.shift || {};
-    const t = sh.in1 ? `${sh.in1}〜${sh.out1}` + (sh.in2 ? ` / ${sh.in2}〜${sh.out2}` : '') : '—';
+    const t = (sh.in1 ? `${sh.in1}〜${sh.out1}` + (sh.in2 ? ` / ${sh.in2}〜${sh.out2}` : '') : '—')
+      + (isKennin(e)
+        ? `<br><span class="hint inline">兼任（${TC5_MODES[otherSide(e)]}）${e.shiftOther.in1}〜${e.shiftOther.out1}</span>`
+        : '');
     const part = (e.type || 'part') === 'part';
     const type = part
       ? '<span class="tag full">パート</span>'
@@ -1119,7 +1149,7 @@ function applyShiftDefault() {
   const emp = getEmp(document.getElementById('inEmp').value);
   const hint = document.getElementById('shiftHint');
   if (!emp) { hint.textContent = ''; return; }
-  const sh = emp.shift || {};
+  const sh = shiftFor(emp, inTc5Mode);
   const staff = (emp.type || 'part') === 'staff';
   const badge = document.getElementById('inEmpBadge');
   badge.textContent = staff ? '正職方式' : 'パート方式';
@@ -1127,7 +1157,7 @@ function applyShiftDefault() {
   hint.textContent = staff
     ? `何時から何時まで休んだかを入れると時間数になります（1日 ${emp.dailyHours}時間で日数換算）。`
     : sh.in1
-      ? `所定：${sh.in1}〜${sh.out1}${sh.in2 ? ` / ${sh.in2}〜${sh.out2}` : ''}。単位を選ぶと自動で入ります（この時間でTC5の給与が計算されます）。`
+      ? `所定${isKennin(emp) ? `（${TC5_MODES[inTc5Mode]}）` : ''}：${sh.in1}〜${sh.out1}${sh.in2 ? ` / ${sh.in2}〜${sh.out2}` : ''}。単位を選ぶと自動で入ります（この時間でTC5の給与が計算されます）。`
       : '所定が未登録です。下の時間帯を手で入れればTC5へ出せます'
         + '（「👤 従業員情報」で登録しておくと毎回自動で入ります）。';
 }
@@ -1155,9 +1185,33 @@ function addMinutes(hhmm, min) {
   return `${pad2(Math.floor(t / 60))}:${pad2(t % 60)}`;
 }
 
+/*
+ *  その人の、TC5のその側（通常／スイミング）の所定。
+ *    shift      … 区分の側の所定（今までの所定はこれ）
+ *    shiftOther … 区分と反対側の所定。通常とスイミングを兼任している人だけ入る
+ *  反対側が未登録なら、今までどおり区分の側の所定を使う。
+ *  side を省くと区分の側。
+ */
+function shiftFor(emp, side) {
+  if (!emp) return {};
+  const primary = emp.mode || 'normal';
+  if (!side || side === primary) return emp.shift || {};
+  return isKennin(emp) ? emp.shiftOther : (emp.shift || {});
+}
+
+// 通常とスイミングの兼任か（反対側の所定が入っている人）
+function isKennin(emp) {
+  return !!(emp && emp.shiftOther && emp.shiftOther.in1 && emp.shiftOther.out1);
+}
+
+// 区分と反対側の名前（区分が通常ならスイミング）
+function otherSide(emp) {
+  return (emp && emp.mode === 'swim') ? 'normal' : 'swim';
+}
+
 // その人の所定の勤務時間帯を、区間の並びにする（中抜けの②も含む）
-function shiftSegments(emp) {
-  const sh = (emp && emp.shift) || {};
+function shiftSegments(emp, side) {
+  const sh = shiftFor(emp, side);
   const segs = [];
   if (sh.in1 && sh.out1) segs.push({ from: sh.in1, to: sh.out1, min: minutesBetween(sh.in1, sh.out1) });
   if (sh.in2 && sh.out2) segs.push({ from: sh.in2, to: sh.out2, min: minutesBetween(sh.in2, sh.out2) });
@@ -1172,8 +1226,8 @@ function shiftTotalHours(emp) {
 // 所定のちょうど半分を切り出す。半休は「半か全か」だけなので前半を使う
 //   例）15:00〜18:00 の人 → 15:00〜16:30
 // （which に 'pm' を渡すと後半。古いデータの表示用に残してある）
-function halfShift(emp, which) {
-  const segs = shiftSegments(emp);
+function halfShift(emp, which, side) {
+  const segs = shiftSegments(emp, side);
   const total = segs.reduce((s, x) => s + x.min, 0);
   if (!total) return [];
   // 前半と後半でぴったり分かれるようにする（合計が奇数分でも重ならない）
@@ -1297,10 +1351,30 @@ function setTc5Mode(mode) {
   const emp = getEmp(document.getElementById('inEmp').value);
   const hint = document.getElementById('inTc5ModeHint');
   if (!hint) return;
-  hint.textContent = inTc5Mode === 'swim'
+  hint.textContent = (inTc5Mode === 'swim'
     ? 'TC5のスイミング側（timeCards_swim）に入ります。'
     : 'TC5の通常側（timeCards）に入ります。'
-      + (emp && emp.mode === 'swim' ? 'この人はスイミング登録です。' : '');
+      + (emp && emp.mode === 'swim' && !isKennin(emp) ? 'この人はスイミング登録です。' : ''))
+    + (isKennin(emp) ? `兼任なので、${TC5_MODES[inTc5Mode]}の所定を使います。` : '');
+}
+
+// 所定（全日）またはその半分（半休）を時間欄に入れる。TC5のいま選んでいる側の所定を使う
+function fillShiftTimes(emp, type) {
+  if (type === 'full') {
+    setTimeFields(shiftSegments(emp, inTc5Mode).map(x => ({ in: x.from, out: x.to })));
+  } else if (type === 'am' || type === 'pm') {
+    setTimeFields(halfShift(emp, type, inTc5Mode));
+  }
+}
+
+// 兼任の人がTC5の側を切り替えたら、その側の所定に入れ直す。
+// 兼任でない人はどちらの側でも同じ所定なので、手で直した時間を消さないよう触らない
+function onTc5SideChanged() {
+  const emp = getEmp(document.getElementById('inEmp').value);
+  if (!emp || (emp.type || 'part') !== 'part' || !isKennin(emp)) return;
+  applyShiftDefault();
+  if (shiftSegments(emp, inTc5Mode).length) fillShiftTimes(emp, inputType);
+  syncHoursFromTimes();
 }
 
 function setInputType(type, fill) {
@@ -1324,14 +1398,9 @@ function setInputType(type, fill) {
 
   // パートは所定から時間帯を自動で入れる（TC5の給与計算にそのまま使うため）。
   // 所定が未登録の人は手で入れてもらうので、入力欄には触らない。
-  const hasShift = emp && shiftSegments(emp).length > 0;
-  if (fill && !staff && hasShift) {
-    if (type === 'full') {
-      setTimeFields(shiftSegments(emp).map(x => ({ in: x.from, out: x.to })));
-    } else if (type === 'am' || type === 'pm') {
-      setTimeFields(halfShift(emp, type));
-    }
-  }
+  // 兼任の人は、TC5のどちらに入れるかで使う所定が変わる
+  const hasShift = emp && shiftSegments(emp, inTc5Mode).length > 0;
+  if (fill && !staff && hasShift) fillShiftTimes(emp, type);
 
   // 時間帯を埋めるボタン（手で直したあとでも押せば戻せる）
   renderShiftCalc();
@@ -1536,20 +1605,39 @@ function maybeSaveShift(emp, times) {
   if (!emp || (emp.type || 'part') !== 'part') return false;   // 正職に所定の考えは無い
   if (inputType !== 'full') return false;
   if (!times.in1 || !times.out1) return false;
-  if ((emp.shift || {}).in1) return false;                     // もう登録してある
+
+  // TC5の区分の側に入れたなら今までの所定、反対側なら兼任の所定として扱う
+  const toOther = inTc5Mode !== (emp.mode || 'normal');
+  const main = emp.shift || {};
+  if (toOther) {
+    if ((emp.shiftOther || {}).in1) return false;               // 兼任の所定はもう登録してある
+    // 区分の側の所定が勝手に入ったまま登録しただけなら、兼任の所定とはみなさない
+    if (main.in1 && main.in1 === times.in1 && main.out1 === times.out1
+        && (main.in2 || '') === (times.in2 || '') && (main.out2 || '') === (times.out2 || '')) return false;
+  } else if (main.in1) {
+    return false;                                               // もう登録してある
+  }
 
   const label = `${times.in1}〜${times.out1}`
     + (times.in2 && times.out2 ? ` / ${times.in2}〜${times.out2}` : '');
-  if (!confirm(`${emp.name} さんは所定の勤務時間帯が未登録です。\n`
-    + `いま入れた ${label} を所定として登録しますか？\n\n`
-    + '登録しておくと、次からは単位を選ぶだけで時間帯が自動で入ります。')) return false;
+  const side = TC5_MODES[inTc5Mode];
+  const msg = toOther
+    ? `${emp.name} さんの${side}側の所定が未登録です。\n`
+      + `いま入れた ${label} を「${side}の所定」として登録しますか？\n`
+      + `（${TC5_MODES[emp.mode || 'normal']}と${side}の兼任として扱います）\n\n`
+      + `登録しておくと、次から${side}側を選んだときはこの時間が自動で入ります。`
+    : `${emp.name} さんは所定の勤務時間帯が未登録です。\n`
+      + `いま入れた ${label} を所定として登録しますか？\n\n`
+      + '登録しておくと、次からは単位を選ぶだけで時間帯が自動で入ります。';
+  if (!confirm(msg)) return false;
 
-  emp.shift = {
+  const shift = {
     in1: times.in1, out1: times.out1,
     in2: times.in2 || '', out2: times.out2 || ''
   };
+  if (toOther) emp.shiftOther = shift; else emp.shift = shift;
   saveDB();
-  showToast(`${emp.name} さんの所定を ${label} で登録しました`, 'success');
+  showToast(`${emp.name} さんの${toOther ? `${side}の` : ''}所定を ${label} で登録しました`, 'success');
   return true;
 }
 
@@ -3553,7 +3641,9 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('inCard').addEventListener('keydown', onInputEnter);
   document.getElementById('inTc5Mode').addEventListener('click', e => {
     const b = e.target.closest('button[data-tc5]');
-    if (b) setTc5Mode(b.dataset.tc5);
+    if (!b) return;
+    setTc5Mode(b.dataset.tc5);
+    onTc5SideChanged();
   });
   document.getElementById('inModeSeg').addEventListener('click', e => {
     const b = e.target.closest('button[data-mode]');
@@ -3601,8 +3691,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!b) return;
     // パートで半休を選んでいるなら、その半分を入れ直す
     const pairs = (inputType === 'am' || inputType === 'pm')
-      ? halfShift(emp, inputType)
-      : shiftSegments(emp).map(x => ({ in: x.from, out: x.to }));
+      ? halfShift(emp, inputType, inTc5Mode)
+      : shiftSegments(emp, inTc5Mode).map(x => ({ in: x.from, out: x.to }));
     setTimeFields(pairs);
     syncHoursFromTimes();
     renderBalancePreview();
@@ -3883,6 +3973,8 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   document.getElementById('empType').addEventListener('change', applyEmpTypeFields);
+  // 区分を変えたら、所定の欄がどちらの側か見出しを直す
+  document.getElementById('empMode').addEventListener('change', renderEmpShiftLabels);
   document.getElementById('empSave').addEventListener('click', saveEmployee);
   document.getElementById('empCancel').addEventListener('click', closeEmpForm);
   document.getElementById('empAddBtn').addEventListener('click', () => openEmpForm(null));
