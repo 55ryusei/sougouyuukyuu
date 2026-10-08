@@ -413,6 +413,24 @@ function sameLeave(a, b) {
     && (a.in1 || '') === (b.in1 || '') && (a.out1 || '') === (b.out1 || '');
 }
 
+// 有給1件を見分ける鍵。ふつうは id（1件ごとに違う）。
+// id の無い古い記録だけ中身で見分ける（時間単位は同じ日に何件もあり得るので時間帯まで見る）
+function leaveKey(l) {
+  return l.id || `${l.empId}|${l.date}|${l.type}|${Number(l.hours) || 0}|${l.in1 || ''}|${l.out1 || ''}`;
+}
+
+/*
+ *  その有給を入れた時刻（ミリ秒）。
+ *  id の先頭8文字は登録した瞬間の Date.now() を36進にしたもの（newId を参照）。
+ *  データの並びは年度ファイルの読み込みで入れ替わるので、「入力した順」はこちらで決める。
+ *  読めないときは 0（＝いちばん古い扱い）。
+ */
+function leaveCreatedAt(l) {
+  const m = /^[0-9a-z]{8}/.exec(String((l && l.id) || ''));
+  const t = m ? parseInt(m[0], 36) : NaN;
+  return Number.isFinite(t) ? t : 0;
+}
+
 // 1件の有給が何日ぶんか
 function leaveDays(leave, emp) {
   if (leave.type === 'full')  return 1;
@@ -1745,10 +1763,13 @@ function renderLeaveTable() {
   let rows = DB.leaves.map((l, seq) => ({ l, seq, emp: getEmp(l.empId) })).filter(x => x.emp);
   if (q) rows = rows.filter(x => x.emp.name.includes(q) || x.emp.tcName.includes(q));
   if (month) rows = rows.filter(x => x.l.date.slice(0, 7) === month);
+  // 入力した順は、入れた時刻（idに入っている）で決める。同じ瞬間に入ったもの（複数日を
+  // まとめて登録したとき等）はデータの並び順で決める
+  const byInput = (a, b) => (leaveCreatedAt(a.l) - leaveCreatedAt(b.l)) || (a.seq - b.seq);
   rows.sort((a, b) => {
-    if (sort === 'seq_asc')  return a.seq - b.seq;
-    if (sort === 'seq_desc') return b.seq - a.seq;
-    const d = a.l.date < b.l.date ? -1 : a.l.date > b.l.date ? 1 : a.seq - b.seq;
+    if (sort === 'seq_asc')  return byInput(a, b);
+    if (sort === 'seq_desc') return byInput(b, a);
+    const d = a.l.date < b.l.date ? -1 : a.l.date > b.l.date ? 1 : byInput(a, b);
     return sort === 'date_asc' ? d : -d;
   });
 
@@ -3276,13 +3297,19 @@ function mergeYearFiles(list) {
     if (!tcNames && Array.isArray(c.tcNames) && c.tcNames.length) tcNames = c.tcNames;
     if (!termMode && (c.termMode === 'work' || c.termMode === 'absent')) termMode = c.termMode;
     (c.employees || []).forEach(e => { if (!emps.has(e.id)) emps.set(e.id, e); });
+    // 同じ有給かは id で見る。日付と単位で見ると、正職の同じ日の2件目が消えてしまう
     (c.leaves || []).forEach(l => {
-      const k = `${l.empId}|${l.date}|${l.type}`;
+      const k = leaveKey(l);
       if (!leaves.has(k)) leaves.set(k, l);
     });
     for (const y in (c.fiscal || {})) if (!fiscal[y]) fiscal[y] = c.fiscal[y];
   }
-  return { employees: [...emps.values()], leaves: [...leaves.values()], fiscal,
+  // 年度ファイルごとにつなぐと入力の順がばらけるので、入れた順に並べ直す
+  const ordered = [...leaves.values()]
+    .map((l, i) => ({ l, i }))
+    .sort((a, b) => (leaveCreatedAt(a.l) - leaveCreatedAt(b.l)) || (a.i - b.i))
+    .map(x => x.l);
+  return { employees: [...emps.values()], leaves: ordered, fiscal,
            tcNames: tcNames || [...DEFAULT_TC5_NAMES], termMode: termMode || 'work' };
 }
 
@@ -3509,8 +3536,8 @@ async function restoreFolder() {
       if (files.length) {
         const merged = mergeYearFiles(files);
         // フォルダに無い記録がこのブラウザにあるなら、黙って上書きしない
-        const keys = new Set(merged.leaves.map(l => `${l.empId}|${l.date}|${l.type}`));
-        const onlyHere = DB.leaves.filter(l => !keys.has(`${l.empId}|${l.date}|${l.type}`)).length;
+        const keys = new Set(merged.leaves.map(leaveKey));
+        const onlyHere = DB.leaves.filter(l => !keys.has(leaveKey(l))).length;
         if (onlyHere > 0) {
           setFsStatus(`⚠ このブラウザに、フォルダのファイルに無い有給が ${onlyHere}件 あります。`
             + '自動では読み込みませんでした。どちらを使うか決めてください'
