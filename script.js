@@ -3617,7 +3617,32 @@ function buildAppSummary(asOf) {
         duty: r.duty ? { taken: appNum(r.duty.taken), remain: appNum(r.duty.remain), deadline: r.duty.deadline } : null,
         next: r.next ? { date: r.next.from, days: r.next.invalid ? 0 : appNum(r.next.grant) } : null,
         takes,
-        short: r.shortages.length > 0
+        short: r.shortages.length > 0,
+        // 管理簿の行（アプリ側で同じ管理簿を印刷するため。表示そのままの文字で送る）
+        book: {
+          dailyHours: appNum(emp.dailyHours || 8),
+          // bookHtml と同じく、始まった期だけ（未来の期は印刷でも隠れているので送らない）
+          rows: r.rows.filter(x => x.started).map(x => ({
+            months: x.months, from: x.from, to: x.to, weekDays: x.weekDays, invalid: !!x.invalid,
+            base: appNum(x.base), grant: appNum(x.grant), carry: appNum(x.carry), total: appNum(x.total),
+            taken: fmtDays(x.taken, emp.dailyHours),
+            duty: x.duty === null ? null : appNum(x.duty),     // 0 以下は画面で「終了」
+            remain: fmtDays(x.remain, emp.dailyHours), remainNeg: x.remain < -1e-9,
+            current: !!x.current,
+            takes: x.takes.map(l => ({
+              date: l.date,
+              kind: l.type === 'full' ? 'full' : l.type === 'hours' ? 'hours' : 'half',
+              sub: l.type === 'full' ? '' : (l.type === 'hours' ? leaveHoursText(l) : '半'),
+              title: `${TYPE_LABEL[l.type]}（${leaveDays(l, emp)}日）`
+            }))
+          })),
+          // bookHtml の警告と同じ文（HTML なし）
+          warnings: [
+            ...(r.shortages.length ? ['⚠ 残日数を超えて取得している期があります：'
+              + r.shortages.map(s => `${fmtDate(s.from)}の期（${fmtDays(s.days, emp.dailyHours)}超過）`).join('、')] : []),
+            ...(r.hourlyOver ? [`⚠ 時間単位年休が年5日ぶんを超えています（${fmtDays(r.hourlyOver, emp.dailyHours)}）`] : [])
+          ]
+        }
       });
     }
   }
