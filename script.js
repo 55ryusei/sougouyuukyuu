@@ -21,6 +21,14 @@
 /* ============ 1. 定数・ユーティリティ ============ */
 
 const STORE_KEY = 'yk_data_v1';
+
+// はくつるポータル（アプリ）へ有給の集計を自動送信する先。鍵は端末のlocalStorageにだけ置き、
+// 年度ファイル・バックアップ・書き出しには入れない
+const APP_URL = 'https://hakutsuru-portal.pages.dev';
+const APP_KEY_STORE    = 'yk_app_key';      // 送信用の鍵
+const APP_SENT_STORE   = 'yk_app_sent';     // 最後に送れた集計のハッシュ（sentAt を除く）
+const APP_STATUS_STORE = 'yk_app_status';   // 画面に出す状態
+
 const TC5_MODES = { normal: '通常', swim: 'スイミング' };
 
 // その1件をTC5のどちらに入れるか。
@@ -362,6 +370,7 @@ function writeStorage(key, value) {
 function saveDB() {
   writeStorage(STORE_KEY, JSON.stringify(DB));
   if (typeof scheduleFileWrite === 'function') scheduleFileWrite();   // フォルダ連携中なら年度ファイルにも
+  if (typeof scheduleAppSend === 'function') scheduleAppSend();       // アプリへの自動送信（失敗しても何も起きない）
 }
 
 function newId() {
@@ -3554,6 +3563,151 @@ async function restoreFolder() {
   updateFsStatus();
 }
 
+/* ============ 8.6 アプリ（はくつるポータル）への自動送信 ============ */
+/*
+ *  保存のたびに、このツール自身の計算（computeLedger / computeStaffYear）の結果を
+ *  アプリへ送る。事務の操作は変わらない。送れなくても何も止まらず、状態の一行が変わるだけ。
+ *  前回送れた内容（日付 asOf は含む・sentAt は含まない）と同じなら送らない。
+ */
+
+function appNum(n) { return round2(Number(n) || 0); }
+
+// 送る中身（sentAt は送る直前に足す）
+function buildAppSummary(asOf) {
+  const fiscalYear = fiscalYearOf(asOf);
+  const part = [], staff = [];
+  for (const emp of sortedEmployees()) {
+    if (emp.active === false) continue;                 // 退職者は送らない
+    if (emp.type === 'staff') {
+      const s = computeStaffYear(emp, fiscalYear);
+      staff.push({
+        name: emp.name || '',
+        dailyHours: appNum(s.daily),
+        totalHours: appNum(s.totalHours),
+        days: appNum(s.days),
+        restHours: appNum(s.rest),
+        count: s.count,
+        terms: s.terms.map(t => ({
+          label: t.label, max: appNum(t.max), taken: appNum(t.taken), remain: appNum(t.remain)
+        })),
+        longTaken: appNum(s.longSum),
+        longRemain: appNum(s.longRemain),
+        grandDays: appNum(s.grandDays)
+      });
+    } else {
+      const r = computeLedger(emp, asOf);
+      const c = r.current;
+      const takes = (c ? c.takes : []).map(l => ({
+        date: l.date,
+        label: l.type === 'hours' ? `時間 ${leaveHoursText(l)}` : (TYPE_LABEL[l.type] || ''),
+        days: appNum(leaveDays(l, emp))
+      })).sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+      part.push({
+        name: emp.name || '',
+        kana: emp.kana || '',
+        hire: emp.hire || '',
+        service: serviceLength(emp.hire, asOf),
+        periodFrom: c ? c.from : '',
+        periodTo: c ? c.to : '',
+        grant: c ? appNum(c.grant) : 0,
+        carry: c ? appNum(c.carry) : 0,
+        total: c ? appNum(c.total) : 0,
+        taken: c ? appNum(c.taken) : 0,
+        balance: appNum(r.balance),
+        duty: r.duty ? { taken: appNum(r.duty.taken), remain: appNum(r.duty.remain), deadline: r.duty.deadline } : null,
+        next: r.next ? { date: r.next.from, days: r.next.invalid ? 0 : appNum(r.next.grant) } : null,
+        takes,
+        short: r.shortages.length > 0
+      });
+    }
+  }
+  return { format: 'yukyu-app-summary', version: 1, asOf, fiscalYear, part, staff };
+}
+
+// 単純な文字列ハッシュ（FNV-1a）。同じ内容を二度送らないための目印
+function appHash(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16) + ':' + text.length;
+}
+
+function appGet(key) { try { return localStorage.getItem(key) || ''; } catch { return ''; } }
+function appSet(key, value) { try { localStorage.setItem(key, value); } catch {} }
+
+// 状態の一行を保存して画面に出す。kind は ok / err / off
+function setAppStatus(kind, text, extra) {
+  appSet(APP_STATUS_STORE, JSON.stringify({ kind, text, ...(extra || {}) }));
+  renderAppStatus();
+}
+
+function renderAppStatus() {
+  try {
+    const el = typeof document !== 'undefined' && document.getElementById('appStatus');
+    if (!el) return;
+    let st = null;
+    try { st = JSON.parse(appGet(APP_STATUS_STORE) || 'null'); } catch {}
+    if (!appGet(APP_KEY_STORE)) st = { kind: 'off', text: '鍵が未設定' };
+    el.textContent = st ? st.text : '（まだ送っていません）';
+    el.className = 'fs-status' + (st && st.kind === 'err' ? ' warn' : st && st.kind === 'ok' ? ' ok' : '');
+  } catch {}
+}
+
+let appSendTimer = null;
+let appSending = false;
+
+// 保存のたびに呼ばれる。5秒まとめて1回だけ送る
+function scheduleAppSend() {
+  try {
+    clearTimeout(appSendTimer);
+    appSendTimer = setTimeout(() => { sendAppSummary(false); }, 5000);
+  } catch {}
+}
+
+// 送る。force=true なら前回と同じ内容でも送る。何があっても例外は外に出さない
+async function sendAppSummary(force) {
+  try {
+    const key = appGet(APP_KEY_STORE);
+    if (!key) { setAppStatus('off', '鍵が未設定'); return; }
+    if (appSending) { scheduleAppSend(); return; }
+    const body = buildAppSummary(todayStr());
+    const hash = appHash(JSON.stringify(body));
+    if (!force && hash === appGet(APP_SENT_STORE)) return;
+    appSending = true;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000);
+    try {
+      const res = await fetch(`${APP_URL}/api/hr/leave`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-HR-Key': key },
+        body: JSON.stringify({ ...body, sentAt: new Date().toISOString() }),
+        signal: ctrl.signal
+      });
+      if (res.ok) {
+        appSet(APP_SENT_STORE, hash);
+        const d = new Date();
+        setAppStatus('ok', `送信済み ${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${pad2(d.getMinutes())}`
+          + `（パート${body.part.length}人・正職${body.staff.length}人）`);
+      } else if (res.status === 401) {
+        setAppStatus('err', '送信できませんでした（鍵が違います）');
+      } else if (res.status === 503) {
+        setAppStatus('err', '送信できませんでした（アプリ側の準備ができていません）');
+      } else {
+        setAppStatus('err', `送信できませんでした（エラー ${res.status}）`);
+      }
+    } catch {
+      setAppStatus('err', '送信できませんでした（ネットにつながっていません）');
+    } finally {
+      clearTimeout(timer);
+      appSending = false;
+    }
+  } catch {
+    appSending = false;
+  }
+}
+
 /* ============ 9. 初期化 ============ */
 
 function renderAll() {
@@ -4128,9 +4282,27 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast('全データを削除しました', 'success');
   });
 
+  // アプリへの送信（鍵の保存→すぐ送る／今すぐ送る）
+  document.getElementById('appKeySaveBtn').addEventListener('click', () => {
+    const v = document.getElementById('appKeyInput').value.trim();
+    if (!v) { showToast('鍵を入力してください', 'warning'); return; }
+    appSet(APP_KEY_STORE, v);
+    document.getElementById('appKeyInput').value = '';
+    appSet(APP_SENT_STORE, '');
+    showToast('鍵を保存しました。送信します', 'success');
+    sendAppSummary(true);
+  });
+  document.getElementById('appSendBtn').addEventListener('click', () => {
+    appSet(APP_SENT_STORE, '');
+    sendAppSummary(true);
+  });
+  document.getElementById('appKeyInput').placeholder = appGet(APP_KEY_STORE) ? '（保存済み・変えるときだけ入力）' : '鍵を貼り付け';
+  renderAppStatus();
+
   setPeriod(0);
   refreshStaffYearSelect();
   closeEmpForm();
   renderAll();
   restoreFolder();
+  scheduleAppSend();   // 起動時にも一度（日付が進むと残日数が変わるため）
 });

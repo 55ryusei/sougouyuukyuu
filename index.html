@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>年次有給休暇 管理ツール 1.0.0</title>
-<link rel="stylesheet" href="styles.css?v=2.21.1">
+<link rel="stylesheet" href="styles.css?v=2.22.0">
 </head>
 <body>
 
@@ -13,7 +13,7 @@
     <span class="brand-icon">🏖</span>
     <div>
       <h1>年次有給休暇 管理ツール</h1>
-      <div class="brand-sub">パートも正職も、入力はここだけ<span class="ver">v2.21.1</span></div>
+      <div class="brand-sub">パートも正職も、入力はここだけ<span class="ver">v2.22.0</span></div>
     </div>
   </div>
   <div class="header-right">
@@ -414,6 +414,25 @@
     </div>
   </div>
 
+  <div class="card collapsed" data-fold="io-app">
+    <h2 class="foldable">📱 アプリへ送る <span class="count">残日数をアプリで見られるようにする</span></h2>
+    <div class="card-body">
+      <div id="appStatus" class="fs-status"></div>
+      <div class="field">
+        <label for="appKeyInput">送信用の鍵</label>
+        <input type="password" id="appKeyInput" autocomplete="off">
+      </div>
+      <div class="btn-row wrap">
+        <button type="button" id="appKeySaveBtn" class="btn primary">保存</button>
+        <button type="button" id="appSendBtn" class="btn">今すぐ送る</button>
+      </div>
+      <div class="hint">
+        保存のたびに、残日数などの集計を自動でアプリへ送ります（退職者は除く）。送れなくてもこのツールは普通に使えます。
+        鍵はこのパソコンのブラウザにだけ残り、保存ファイルやバックアップには入りません。
+      </div>
+    </div>
+  </div>
+
   <div class="card collapsed" data-fold="io-import">
     <h2 class="foldable">📥 最初の取込 <span class="count">今までのデータを持ってくる</span></h2>
     <div class="card-body">
@@ -489,6 +508,6 @@
 <div id="toastArea"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.17.0/xlsx.full.min.js"></script>
-<script src="script.js?v=2.21.1"></script>
+<script src="script.js?v=2.22.0"></script>
 </body>
 </html>
